@@ -116,6 +116,9 @@ async function sendListMessage(ctx: any, text: string) {
   return ctx.reply(text, Markup.inlineKeyboard(buttons));
 }
 
+bot.command("ping", async (ctx) => {
+  ctx.reply("🏓 Pong! Бот працює.");
+});
 // Спеціальна функція для виводу списку зі згенерованими кнопками редагування
 bot.command("orders", async (ctx) => {
   const PROM_TOKEN = process.env.PROM_API_TOKEN;
