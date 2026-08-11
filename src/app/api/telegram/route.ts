@@ -159,30 +159,47 @@ bot.command("orders", async (ctx) => {
     }
 
     await ctx.telegram.deleteMessage(loadingMsg.chat.id, loadingMsg.message_id);
-    let combinedText = `📋 Список для розсилки (${targetOrders.length} шт):\n\n`;
 
-    for (const order of targetOrders) {
-      const orderId = order.id;
-      const clientName = order.client_first_name || "Без імені";
-      const phone = order.phone || "Немає номеру";
-      const ttn =
-        order.delivery_provider_data?.declaration_number || "Немає ТТН";
+    // ==========================================
+    // РОЗБИВАЄМО ЗАМОВЛЕННЯ НА БЛОКИ (ПО 10 ШТУК)
+    // ==========================================
+    const chunkSize = 10;
+    const totalOrders = targetOrders.length;
 
-      const orderType = getOrderType(order.products);
-      const textMsg = `${orderType} від optotorg.com.ua: ${ttn}`;
+    for (let i = 0; i < totalOrders; i += chunkSize) {
+      const chunk = targetOrders.slice(i, i + chunkSize);
 
-      const room = chatRooms.find((r) => r.buyer_client_id === order.client_id);
-      const statusText = room ? `🟢 Пром-чат (${room.id})` : `📱 Тільки SMS`;
+      // Заголовок для кожної частини
+      let combinedText = `📋 Список (${i + 1}-${Math.min(i + chunkSize, totalOrders)} з ${totalOrders}):\n\n`;
 
-      combinedText += `📦 №${orderId}\n`;
-      combinedText += `👤 Клієнт: ${clientName}\n`;
-      combinedText += `📞 ${phone}\n`;
-      combinedText += `💬 Статус: ${statusText}\n`;
-      combinedText += `📝 Текст: ${textMsg}\n`;
-      combinedText += `〰️〰️〰️〰️〰️〰️〰️〰️\n`;
+      for (const order of chunk) {
+        const orderId = order.id;
+        const clientName = order.client_first_name || "Без імені";
+        const phone = order.phone || "Немає номеру";
+        const ttn =
+          order.delivery_provider_data?.declaration_number || "Немає ТТН";
+        const orderType = getOrderType(order.products);
+        const textMsg = `${orderType} від optotorg.com.ua: ${ttn}`;
+
+        const room = chatRooms.find(
+          (r) => r.buyer_client_id === order.client_id,
+        );
+        const statusText = room ? `🟢 Пром-чат (${room.id})` : `📱 Тільки SMS`;
+
+        combinedText += `📦 №${orderId}\n`;
+        combinedText += `👤 Клієнт: ${clientName}\n`;
+        combinedText += `📞 ${phone}\n`;
+        combinedText += `💬 Статус: ${statusText}\n`;
+        combinedText += `📝 Текст: ${textMsg}\n`;
+        combinedText += `〰️〰️〰️〰️〰️〰️〰️〰️\n`;
+      }
+
+      // Відправляємо кожну частину окремим повідомленням
+      await sendListMessage(ctx, combinedText);
+
+      // Робимо паузу 0.5 сек між відправкою повідомлень, щоб Telegram не заблокував за спам
+      await new Promise((resolve) => setTimeout(resolve, 500));
     }
-
-    await sendListMessage(ctx, combinedText);
   } catch (error: any) {
     ctx.reply(`❌ Помилка: ${error.message}`);
   }
