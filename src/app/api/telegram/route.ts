@@ -2,43 +2,9 @@ import { Telegraf, Markup } from "telegraf";
 import { NextResponse } from "next/server";
 import axios from "axios";
 import SMSGateway from "android-sms-gateway";
-
-// ==========================================
-// 1. ОГОЛОШЕННЯ ТИПІВ
-// ==========================================
-
-interface Product {
-  id: number;
-  name: string;
-  sku: string;
-  price: string;
-  quantity: number;
-  name_multilang?: {
-    ru?: string;
-    uk?: string;
-  };
-}
-
-interface DeliveryProviderData {
-  provider: string;
-  declaration_number?: string | null;
-}
-
-interface Order {
-  id: number;
-  status: string;
-  status_name: string;
-  client_first_name: string | null;
-  client_last_name: string | null;
-  phone: string | null;
-  delivery_provider_data?: DeliveryProviderData | null;
-  products: Product[];
-  full_price: string;
-}
-
-// ==========================================
-// 2. ІНІЦІАЛІЗАЦІЯ
-// ==========================================
+import { Product } from "@/types/product";
+import { Order } from "@/types/order";
+import { ChatRoom } from "@/types/chat";
 
 const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN as string);
 
@@ -126,21 +92,17 @@ function getOrderType(products: Product[]): string {
   return "Замовлення";
 }
 
-// Спеціальна функція для виводу списку зі згенерованими кнопками редагування
 async function sendListMessage(ctx: any, text: string) {
-  // Знаходимо всі номери замовлень у тексті списку
   const orderIds = [...text.matchAll(/📦 №(\d+)/g)].map((m) => m[1]);
   const buttons = [];
 
-  // Головна кнопка відправки
   buttons.push([
     Markup.button.callback(
-      `📨 Відправити всі SMS (${orderIds.length})`,
+      `📨 Відправити всі (${orderIds.length})`,
       "send_all_sms",
     ),
   ]);
 
-  // Генеруємо кнопки редагування (по 2 в ряд)
   let editRow = [];
   for (const id of orderIds) {
     editRow.push(Markup.button.callback(`✏️ Ред. №${id}`, `edit_${id}`));
@@ -151,48 +113,49 @@ async function sendListMessage(ctx: any, text: string) {
   }
   if (editRow.length > 0) buttons.push(editRow);
 
-  // Використовуємо звичайний текст (без HTML), щоб легше робити заміни тексту
   return ctx.reply(text, Markup.inlineKeyboard(buttons));
 }
 
-// ==========================================
-// 4. ЛОГІКА БОТА
-// ==========================================
-
-bot.start((ctx) => {
-  ctx.reply(
-    "Привіт! Я бот для обробки замовлень.\n/orders - отримати список розсилки.",
-  );
-});
-
-bot.command("ping", (ctx) => {
-  ctx.reply("🟢 Бот працює та готовий до відправки SMS!");
-});
-
+// Спеціальна функція для виводу списку зі згенерованими кнопками редагування
 bot.command("orders", async (ctx) => {
   const PROM_TOKEN = process.env.PROM_API_TOKEN;
   if (!PROM_TOKEN) return ctx.reply("❌ Токен Prom API не налаштовано");
 
-  const loadingMsg = await ctx.reply("⏳ Завантажую замовлення...");
+  const loadingMsg = await ctx.reply(
+    "⏳ Завантажую замовлення та перевіряю чати Prom...",
+  );
 
   try {
-    const apiUrl =
-      "https://my.prom.ua/api/v1/orders/list?limit=50&status=received";
-    const response = await axios.get(apiUrl, {
-      headers: { Authorization: `Bearer ${PROM_TOKEN}` },
-    });
+    const headers = { Authorization: `Bearer ${PROM_TOKEN}` };
 
-    const orders: Order[] = response.data.orders || [];
-    const targetOrders = orders.filter(
-      (order) => order.status === "custom-172548",
+    // 1. Отримуємо замовлення
+    const ordersRes = await axios.get(
+      "https://my.prom.ua/api/v1/orders/list?limit=50&status=received",
+      { headers },
     );
-
-    await ctx.telegram.deleteMessage(loadingMsg.chat.id, loadingMsg.message_id);
+    const orders: Order[] = ordersRes.data.orders || [];
+    const targetOrders = orders.filter((o) => o.status === "custom-172548");
 
     if (targetOrders.length === 0) {
+      await ctx.telegram.deleteMessage(
+        loadingMsg.chat.id,
+        loadingMsg.message_id,
+      );
       return ctx.reply('📭 Немає замовлень у статусі "На відправлення".');
     }
 
+    // 2. Отримуємо чати компанії (якщо метод підтримується)
+    let chatRooms: ChatRoom[] = [];
+    try {
+      const chatsRes = await axios.get("https://my.prom.ua/api/v1/chat/rooms", {
+        headers,
+      });
+      chatRooms = chatsRes.data?.data?.rooms || chatsRes.data?.rooms || [];
+    } catch (e) {
+      console.log("Не вдалося завантажити чати, продовжуємо без них", e);
+    }
+
+    await ctx.telegram.deleteMessage(loadingMsg.chat.id, loadingMsg.message_id);
     let combinedText = `📋 Список для розсилки (${targetOrders.length} шт):\n\n`;
 
     for (const order of targetOrders) {
@@ -203,18 +166,19 @@ bot.command("orders", async (ctx) => {
         order.delivery_provider_data?.declaration_number || "Немає ТТН";
 
       const orderType = getOrderType(order.products);
-      const smsText = `${orderType} від optotorg.com.ua: ${ttn}`;
+      const textMsg = `${orderType} від optotorg.com.ua: ${ttn}`;
 
-      // Використовуємо емодзі замість жирного шрифту, щоб працювало редагування
+      const room = chatRooms.find((r) => r.buyer_client_id === order.client_id);
+      const statusText = room ? `🟢 Пром-чат (${room.id})` : `📱 Тільки SMS`;
+
       combinedText += `📦 №${orderId}\n`;
       combinedText += `👤 Клієнт: ${clientName}\n`;
       combinedText += `📞 ${phone}\n`;
-      combinedText += `🏷 Тип: ${orderType}\n`;
-      combinedText += `💬 SMS: ${smsText}\n`;
+      combinedText += `💬 Статус: ${statusText}\n`;
+      combinedText += `📝 Текст: ${textMsg}\n`;
       combinedText += `〰️〰️〰️〰️〰️〰️〰️〰️\n`;
     }
 
-    // Відправляємо список з кнопками
     await sendListMessage(ctx, combinedText);
   } catch (error: any) {
     ctx.reply(`❌ Помилка: ${error.message}`);
@@ -224,36 +188,31 @@ bot.command("orders", async (ctx) => {
 // ОБРОБКА КНОПКИ РЕДАГУВАННЯ
 bot.action(/edit_(\d+)/, async (ctx) => {
   const orderId = ctx.match[1];
-  // Безпечне отримання тексту:
   const message = ctx.callbackQuery.message;
   const fullText = message && "text" in message ? message.text : "";
 
-  // Знаходимо поточний текст SMS саме для цього замовлення
+  // Оновлений Regex для пошуку поля "📝 Текст:"
   const regex = new RegExp(
-    `📦 №${orderId}[\\s\\S]*?💬 SMS: ([\\s\\S]*?)(?=\\n〰️)`,
+    `📦 №${orderId}[\\s\\S]*?📝 Текст: ([\\s\\S]*?)(?=\\n〰️)`,
   );
   const match = fullText.match(regex);
   const currentSms = match ? match[1] : "";
 
   await ctx.answerCbQuery();
-
-  // Видаляємо старий список, щоб не плутатись
   try {
     await ctx.deleteMessage();
   } catch (e) {}
 
-  // Запитуємо новий текст. Ховаємо старий список в самому низу повідомлення.
   await ctx.reply(
-    `✍️ Редагування замовлення №${orderId}\n\nПоточний текст:\n${currentSms}\n\nНадішліть новий текст SMS у відповідь на це повідомлення.\n\n👇 Не видаляти (пам'ять бота) 👇\n${fullText}`,
+    `✍️ Редагування замовлення №${orderId}\n\nПоточний текст:\n${currentSms}\n\nНадішліть новий текст у відповідь.\n\n👇 Не видаляти (пам'ять бота) 👇\n${fullText}`,
     { reply_markup: { force_reply: true } },
   );
 });
 
-// ОБРОБКА НОВОГО ТЕКСТУ ВІД КОРИСТУВАЧА
+// ОБРОБКА НОВОГО ТЕКСТУ
 bot.on("text", async (ctx) => {
   const replyTo = ctx.message.reply_to_message;
 
-  // Якщо це повідомлення є відповіддю на наш запит редагування
   if (
     replyTo &&
     "text" in replyTo &&
@@ -263,69 +222,88 @@ bot.on("text", async (ctx) => {
     if (!orderIdMatch) return;
 
     const orderId = orderIdMatch[1];
-    const newSmsText = ctx.message.text;
+    const newText = ctx.message.text;
 
-    // Дістаємо старий список з "пам'яті" бота
-    const splitMarker = "👇 Не видаляти (пам'ять бота) 👇\n";
-    const parts = replyTo.text.split(splitMarker);
+    const parts = replyTo.text.split("👇 Не видаляти (пам'ять бота) 👇\n");
     if (parts.length < 2) return;
     const oldFullText = parts[1];
 
-    // Замінюємо СТАРИЙ текст SMS на НОВИЙ тільки для потрібного замовлення
     const regex = new RegExp(
-      `(📦 №${orderId}[\\s\\S]*?💬 SMS: )([\\s\\S]*?)(?=\\n〰️)`,
+      `(📦 №${orderId}[\\s\\S]*?📝 Текст: )([\\s\\S]*?)(?=\\n〰️)`,
     );
-    const updatedText = oldFullText.replace(regex, `$1${newSmsText}`);
+    const updatedText = oldFullText.replace(regex, `$1${newText}`);
 
-    // Прибираємо сліди редагування з чату
     try {
       await ctx.deleteMessage(replyTo.message_id);
       await ctx.deleteMessage(ctx.message.message_id);
     } catch (e) {}
 
-    // Видаємо оновлений список
     await sendListMessage(ctx, updatedText);
   }
 });
 
-// ВІДПРАВКА ВСІХ SMS
+// ВІДПРАВКА ВСІХ ПОВІДОМЛЕНЬ (Гібридна: Чат + SMS)
 bot.action("send_all_sms", async (ctx) => {
   const message = ctx.callbackQuery.message;
-  let messageText = "";
-  if (message && "text" in message) messageText = message.text;
+  const messageText = message && "text" in message ? message.text : "";
 
   if (!messageText) return ctx.answerCbQuery("Помилка читання тексту");
-
-  // Витягуємо телефони та тексти SMS. Оновлений Regex підтримує багаторядкові SMS!
-  const phoneRegex = /📞\s*(\+?\d+)/g;
-  const smsRegex = /💬 SMS: ([\s\S]*?)(?=\n〰️)/g;
-
-  const phones = [...messageText.matchAll(phoneRegex)].map((m) => m[1]);
-  const smsTexts = [...messageText.matchAll(smsRegex)].map((m) => m[1]);
-
-  if (phones.length === 0 || phones.length !== smsTexts.length) {
-    return ctx.answerCbQuery("❌ Помилка парсингу. Спробуйте оновити /orders", {
-      show_alert: true,
-    });
-  }
-
   await ctx.answerCbQuery("Починаю відправку...");
-  const statusMsg = await ctx.reply(`⏳ Відправляю ${phones.length} SMS...`);
 
-  let successCount = 0;
+  // Розбиваємо весь текст на блоки по кожному замовленню
+  const blocks = messageText
+    .split("〰️〰️〰️〰️〰️〰️〰️〰️")
+    .filter((b) => b.trim().length > 10);
+
+  const statusMsg = await ctx.reply(
+    `⏳ Обробляю ${blocks.length} замовлень...`,
+  );
+  const PROM_TOKEN = process.env.PROM_API_TOKEN;
+
+  let smsCount = 0;
+  let chatCount = 0;
   let errorCount = 0;
 
-  for (let i = 0; i < phones.length; i++) {
-    try {
-      await smsgate.send({
-        phoneNumbers: [phones[i]],
-        message: smsTexts[i].trim(),
-      });
-      successCount++;
-      await new Promise((resolve) => setTimeout(resolve, 2000));
-    } catch (error) {
-      console.error(`Помилка відправки на ${phones[i]}:`, error);
-      errorCount++;
+  for (const block of blocks) {
+    const phoneMatch = block.match(/📞\s*(\+?\d+)/);
+    const textMatch = block.match(/📝 Текст:\s*([\s\S]*)$/);
+    const roomMatch = block.match(/🟢 Пром-чат \((\d+)\)/); // Перевіряємо чи є ID чату
+
+    if (!phoneMatch || !textMatch) continue;
+
+    const phone = phoneMatch[1];
+    const textToSend = textMatch[1].trim();
+
+    if (roomMatch && PROM_TOKEN) {
+      // 1. ВАРІАНТ: Є Пром-чат -> Відправляємо через API Prom
+      const roomId = roomMatch[1];
+      try {
+        await axios.post(
+          `https://my.prom.ua/api/v1/chat/rooms/${roomId}/messages`,
+          {
+            text: textToSend,
+          },
+          {
+            headers: { Authorization: `Bearer ${PROM_TOKEN}` },
+          },
+        );
+        chatCount++;
+        await new Promise((resolve) => setTimeout(resolve, 1000)); // Затримка для Prom API
+      } catch (error) {
+        console.error(`Помилка Prom-чату для кімнати ${roomId}:`, error);
+        errorCount++;
+        // Як варіант на майбутнє: тут можна додати fallback на SMS, якщо чат не пройшов
+      }
+    } else {
+      // 2. ВАРІАНТ: Тільки SMS -> Відправляємо через SMSGate
+      try {
+        await smsgate.send({ phoneNumbers: [phone], message: textToSend });
+        smsCount++;
+        await new Promise((resolve) => setTimeout(resolve, 2000)); // Затримка для Android SMS
+      } catch (error) {
+        console.error(`Помилка SMS на номер ${phone}:`, error);
+        errorCount++;
+      }
     }
   }
 
@@ -333,7 +311,7 @@ bot.action("send_all_sms", async (ctx) => {
     statusMsg.chat.id,
     statusMsg.message_id,
     undefined,
-    `✅ Розсилка завершена!\nУспішно: ${successCount}\nПомилок: ${errorCount}`,
+    `✅ Розсилка завершена!\n\n💬 У Пром-чат: ${chatCount}\n📱 По SMS: ${smsCount}\n❌ Помилок: ${errorCount}`,
   );
 
   await ctx.editMessageReplyMarkup({ inline_keyboard: [] });
