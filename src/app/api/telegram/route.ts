@@ -133,7 +133,7 @@ bot.command("orders", async (ctx) => {
 
     // 1. Отримуємо замовлення
     const ordersRes = await axios.get(
-      "https://my.prom.ua/api/v1/orders/list?limit=50&status=received",
+      "https://my.prom.ua/api/v1/orders/list?limit=100&status=received",
       { headers },
     );
     const orders: Order[] = ordersRes.data.orders || [];
@@ -298,11 +298,10 @@ bot.action("send_all_sms", async (ctx) => {
         // Як варіант на майбутнє: тут можна додати fallback на SMS, якщо чат не пройшов
       }
     } else {
-      // 2. ВАРІАНТ: Тільки SMS -> Відправляємо через SMSGate
       try {
         await smsgate.send({ phoneNumbers: [phone], message: textToSend });
         smsCount++;
-        await new Promise((resolve) => setTimeout(resolve, 2000)); // Затримка для Android SMS
+        await new Promise((resolve) => setTimeout(resolve, 2000));
       } catch (error) {
         console.error(`Помилка SMS на номер ${phone}:`, error);
         errorCount++;
