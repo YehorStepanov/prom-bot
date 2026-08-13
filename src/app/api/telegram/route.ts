@@ -92,6 +92,22 @@ function getOrderType(products: Product[]): string {
   return "Замовлення";
 }
 
+function getDeliveryType(provider?: string | null): string {
+  switch (provider) {
+    case "nova_poshta":
+      return "(Нова Пошта)";
+    case "ukrposhta":
+      return "(Укрпошта)";
+    case "rozetka_delivery":
+      return "(Розетка)";
+    case "meest_express":
+    case "meest":
+      return "(Meest Пошта)";
+    default:
+      return "";
+  }
+}
+
 async function sendListMessage(ctx: any, text: string) {
   const orderIds = [...text.matchAll(/📦 №(\d+)/g)].map((m) => m[1]);
   const buttons = [];
@@ -179,7 +195,8 @@ bot.command("orders", async (ctx) => {
         const ttn =
           order.delivery_provider_data?.declaration_number || "Немає ТТН";
         const orderType = getOrderType(order.products);
-        const textMsg = `${orderType} від optotorg.com.ua: ${ttn}`;
+        const deliveryType = getDeliveryType(order.products);
+        const textMsg = `${orderType} від optotorg.com.ua ${deliveryType}: ${ttn}`;
 
         const room = chatRooms.find(
           (r) => r.buyer_client_id === order.client_id,
