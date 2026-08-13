@@ -195,7 +195,9 @@ bot.command("orders", async (ctx) => {
         const ttn =
           order.delivery_provider_data?.declaration_number || "Немає ТТН";
         const orderType = getOrderType(order.products);
-        const deliveryType = getDeliveryType(order.products);
+        const deliveryType = getDeliveryType(
+          order.delivery_provider_data?.provider,
+        );
         const textMsg = `${orderType} від optotorg.com.ua ${deliveryType}: ${ttn}`;
 
         const room = chatRooms.find(
