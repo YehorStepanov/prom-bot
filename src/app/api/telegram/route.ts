@@ -1,11 +1,15 @@
-import { Telegraf, Markup } from "telegraf";
+import { Telegraf } from "telegraf";
 import { NextResponse } from "next/server";
 import axios from "axios";
 import SMSGateway from "android-sms-gateway";
-import { Product } from "@/types/product";
 import { Order } from "@/types/order";
 import { ChatRoom } from "@/types/chat";
 import * as XLSX from "xlsx";
+import {
+  getOrderType,
+  getDeliveryType,
+  sendListMessage,
+} from "@/lib/utils/func";
 
 const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN as string);
 
@@ -16,122 +20,11 @@ const smsgate = new SMSGateway(
 
 bot.telegram
   .setMyCommands([
+    { command: "export", description: "Експортувати товари з Prom" },
     { command: "orders", description: "Отримати список розсилки SMS" },
     { command: "ping", description: "Перевірити статус бота" },
   ])
   .catch(console.error);
-
-// ==========================================
-// 3. ДОПОМІЖНІ ФУНКЦІЇ
-// ==========================================
-
-function getOrderType(products: Product[]): string {
-  const allNames = products
-    .map((p) => {
-      const nameRu = p.name_multilang?.ru?.toLowerCase() || "";
-      const nameUk = p.name_multilang?.uk?.toLowerCase() || "";
-      return nameRu + " " + nameUk + " " + p.name.toLowerCase();
-    })
-    .join(" ");
-
-  if (
-    allNames.includes("шнурк") ||
-    allNames.includes("липучк") ||
-    allNames.includes("блискавк") ||
-    allNames.includes("молния") ||
-    allNames.includes("ланцюж") ||
-    allNames.includes("цепочк")
-  )
-    return "Фурнітура";
-  if (
-    allNames.includes("комар") ||
-    allNames.includes("раптор") ||
-    allNames.includes("москіт") ||
-    allNames.includes("фумігатор") ||
-    allNames.includes("комах") ||
-    allNames.includes("дихлофос") ||
-    allNames.includes("тарган") ||
-    allNames.includes("мурах") ||
-    allNames.includes("моль")
-  )
-    return "Засоби від комах";
-  if (
-    allNames.includes("очисник") ||
-    allNames.includes("очиститель") ||
-    allNames.includes("нейтралізатор") ||
-    allNames.includes("засіб") ||
-    allNames.includes("мастика") ||
-    allNames.includes("біоактиватор")
-  )
-    return "Побутова хімія";
-  if (
-    allNames.includes("обкладинк") ||
-    allNames.includes("обложка") ||
-    allNames.includes("посвідчен") ||
-    allNames.includes("удостоверен")
-  )
-    return "Галантерея";
-  if (
-    allNames.includes("крем") ||
-    allNames.includes("фарба") ||
-    allNames.includes("краска") ||
-    allNames.includes("губка") ||
-    allNames.includes("устілк") ||
-    allNames.includes("стельк") ||
-    allNames.includes("дезодорант") ||
-    allNames.includes("щітка") ||
-    allNames.includes("coccine")
-  )
-    return "Догляд за взуттям";
-  if (
-    allNames.includes("відро") ||
-    allNames.includes("ведро") ||
-    allNames.includes("ріжок")
-  )
-    return "Госптовари";
-
-  return "Замовлення";
-}
-
-function getDeliveryType(provider?: string | null): string {
-  switch (provider) {
-    case "nova_poshta":
-      return "(Нова Пошта)";
-    case "ukrposhta":
-      return "(Укрпошта)";
-    case "rozetka_delivery":
-      return "(Розетка)";
-    case "meest_express":
-    case "meest":
-      return "(Meest Пошта)";
-    default:
-      return "";
-  }
-}
-
-async function sendListMessage(ctx: any, text: string) {
-  const orderIds = [...text.matchAll(/📦 №(\d+)/g)].map((m) => m[1]);
-  const buttons = [];
-
-  buttons.push([
-    Markup.button.callback(
-      `📨 Відправити всі (${orderIds.length})`,
-      "send_all_sms",
-    ),
-  ]);
-
-  let editRow = [];
-  for (const id of orderIds) {
-    editRow.push(Markup.button.callback(`✏️ Ред. №${id}`, `edit_${id}`));
-    if (editRow.length === 2) {
-      buttons.push(editRow);
-      editRow = [];
-    }
-  }
-  if (editRow.length > 0) buttons.push(editRow);
-
-  return ctx.reply(text, Markup.inlineKeyboard(buttons));
-}
 
 bot.command("ping", async (ctx) => {
   ctx.reply("🏓 Pong! Бот працює.");
@@ -191,7 +84,7 @@ bot.command("export", async (ctx) => {
     const worksheet = XLSX.utils.json_to_sheet(aggregatedProducts);
 
     worksheet["!cols"] = [
-      { wch: 15 }, // Артикул
+      { wch: 23 }, // Артикул
       { wch: 50 }, // Назва
       { wch: 10 }, // Кількість
       { wch: 60 }, // Зображення (URL)
