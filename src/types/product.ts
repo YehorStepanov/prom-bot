@@ -4,6 +4,7 @@ export interface Product {
   sku: string;
   price: string;
   quantity: number;
+  image?: string;
   name_multilang?: {
     ru?: string;
     uk?: string;
