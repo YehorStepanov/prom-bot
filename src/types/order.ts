@@ -13,6 +13,8 @@ export interface Order {
   client_first_name: string | null;
   client_last_name: string | null;
   phone: string | null;
+  email?: string | null;
+  payment_option?: { name: string };
   delivery_provider_data?: DeliveryProviderData | null;
   products: Product[];
   full_price: string;

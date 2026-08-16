@@ -20,7 +20,7 @@ const smsgate = new SMSGateway(
 
 bot.telegram
   .setMyCommands([
-    { command: "export", description: "Експортувати товари з Prom" },
+    { command: "export", description: "Експортувати замовлення з Prom" },
     { command: "orders", description: "Отримати список розсилки SMS" },
     { command: "ping", description: "Перевірити статус бота" },
   ])
@@ -34,20 +34,16 @@ bot.command("export", async (ctx) => {
   const PROM_TOKEN = process.env.PROM_API_TOKEN;
   if (!PROM_TOKEN) return ctx.reply("❌ Токен Prom API не налаштовано");
 
-  const loadingMsg = await ctx.reply(
-    "⏳ Збираю товари та формую Excel файл...",
-  );
+  const loadingMsg = await ctx.reply("⏳ Формую Excel файл...");
 
   try {
     const headers = { Authorization: `Bearer ${PROM_TOKEN}` };
 
-    // Загружаем заказы
     const ordersRes = await axios.get(
       "https://my.prom.ua/api/v1/orders/list?limit=100&status=received",
       { headers },
     );
     const orders: Order[] = ordersRes.data.orders || [];
-
     const targetOrders = orders.filter((o) => o.status === "custom-172548");
 
     if (targetOrders.length === 0) {
@@ -55,10 +51,31 @@ bot.command("export", async (ctx) => {
         loadingMsg.chat.id,
         loadingMsg.message_id,
       );
-      return ctx.reply(
-        '📭 Немає замовлень у статусі "На відправлення" для вивантаження.',
-      );
+      return ctx.reply('📭 Немає замовлень у статусі "На відправлення".');
     }
+    const ordersData = targetOrders.map((order) => {
+      const productsList = order.products
+        .map((p) => `${p.sku} (${p.quantity} шт.)`)
+        .join(";\n");
+
+      return {
+        "Номер замовлення": order.id,
+        Телефон: order.phone || "Немає номеру",
+        "Спосіб оплати": order.payment_option?.name || "Не вказано",
+        Товари: productsList,
+        "Сума (грн)":
+          Number(order.full_price.replace(/\s/g, "")) || order.full_price, // Пытаемся сделать числом для Excel
+      };
+    });
+
+    const worksheetOrders = XLSX.utils.json_to_sheet(ordersData);
+    worksheetOrders["!cols"] = [
+      { wch: 18 }, // Номер
+      { wch: 20 }, // Телефон
+      { wch: 30 }, // Спосіб оплати
+      { wch: 70 }, // Товари (широкая колонка)
+      { wch: 15 }, // Сума
+    ];
 
     const productMap = new Map<string, any>();
 
@@ -79,18 +96,19 @@ bot.command("export", async (ctx) => {
         }
       }
     }
+
     const aggregatedProducts = Array.from(productMap.values());
-
-    const worksheet = XLSX.utils.json_to_sheet(aggregatedProducts);
-
-    worksheet["!cols"] = [
-      { wch: 23 }, // Артикул
-      { wch: 50 }, // Назва
+    const worksheetWarehouse = XLSX.utils.json_to_sheet(aggregatedProducts);
+    worksheetWarehouse["!cols"] = [
+      { wch: 15 }, // Артикул
+      { wch: 60 }, // Назва
       { wch: 10 }, // Кількість
-      { wch: 60 }, // Зображення (URL)
+      { wch: 50 }, // Зображення
     ];
     const workbook = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(workbook, worksheet, "Товари для відправки");
+
+    XLSX.utils.book_append_sheet(workbook, worksheetOrders, "Замовлення");
+    XLSX.utils.book_append_sheet(workbook, worksheetWarehouse, "Товари");
 
     const excelBuffer = XLSX.write(workbook, {
       bookType: "xlsx",
@@ -102,10 +120,10 @@ bot.command("export", async (ctx) => {
     await ctx.replyWithDocument(
       {
         source: Buffer.from(excelBuffer),
-        filename: `Збірка_товарів_${new Date().toLocaleDateString("uk-UA").replace(/\./g, "-")}.xlsx`,
+        filename: `Збірка_Товарів_${new Date().toLocaleDateString("uk-UA").replace(/\./g, "-")}.xlsx`,
       },
       {
-        caption: `📦 **Збірний лист готовий!**\n\nВсього унікальних позицій: ${aggregatedProducts.length}`,
+        caption: `📦 Звіт згенеровано!\n\n🔹 Замовлень: ${targetOrders.length}\n🔹 Унікальних товарів: ${aggregatedProducts.length}`,
       },
     );
   } catch (error: any) {
