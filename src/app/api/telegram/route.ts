@@ -44,7 +44,7 @@ bot.command("export", async (ctx) => {
       { headers },
     );
     const orders: Order[] = ordersRes.data.orders || [];
-    const targetOrders = orders.filter((o) => o.status === "custom-172548");
+    const targetOrders = orders.filter((o) => o.status === "custom-172802");
 
     if (targetOrders.length === 0) {
       await ctx.telegram.deleteMessage(
