@@ -5,13 +5,18 @@ import SMSGateway from "android-sms-gateway";
 import { Order } from "@/types/order";
 import { ChatRoom } from "@/types/chat";
 import * as XLSX from "xlsx";
+import ExcelJS from "exceljs";
 import {
   getOrderType,
   getDeliveryType,
   sendListMessage,
 } from "@/lib/utils/func";
+import dbConnect from "@/lib/mongodb";
+import ProductStock from "@/models/ProductStock";
 
 const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN as string);
+
+const OWNER_ID = process.env.MY_CHAT_ID;
 
 const smsgate = new SMSGateway(
   process.env.SMSGATE_LOGIN as string,
@@ -26,8 +31,186 @@ bot.telegram
   ])
   .catch(console.error);
 
+const isOwner = (ctx: any, next: any) => {
+  if (ctx.from?.id !== OWNER_ID) {
+    return ctx.reply(
+      "⛔️ Доступ заборонено. Тільки власник може керувати складом.",
+    );
+  }
+  return next();
+};
+
 bot.command("ping", async (ctx) => {
   ctx.reply("🏓 Pong! Бот працює.");
+});
+
+bot.on("document", isOwner, async (ctx) => {
+  const document = ctx.message.document;
+
+  // Перевіряємо, чи це Excel файл
+  if (
+    !document.mime_type?.includes("officedocument.spreadsheetml.sheet") &&
+    !document.file_name?.endsWith(".xlsx")
+  ) {
+    return ctx.reply(
+      "❌ Помилка: Я приймаю тільки файли формату Excel (.xlsx).",
+    );
+  }
+
+  const statusMsg = await ctx.reply("⏳ Завантажую та обробляю файл...");
+
+  try {
+    await dbConnect();
+    const fileUrl = await ctx.telegram.getFileLink(document.file_id);
+
+    // 2. Скачуємо файл в буфер
+    const response = await axios.get(fileUrl.href, {
+      responseType: "arraybuffer",
+    });
+    const buffer = Buffer.from(response.data);
+
+    // 3. Відкриваємо Excel книгу
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.load(buffer);
+    const worksheet = workbook.getWorksheet(1);
+
+    if (!worksheet) {
+      throw new Error("Файл порожній або не має сторінок.");
+    }
+
+    const bulkOps: any[] = [];
+    let rowsProcessed = 0;
+    const errors: string[] = [];
+
+    worksheet.eachRow((row, rowNumber) => {
+      if (rowNumber === 1) return;
+
+      const skuCell = row.getCell(1).value;
+      const valueCell = row.getCell(2).value;
+      const nameCell = row.getCell(3).value;
+
+      // Чистимо дані
+      const sku = skuCell?.toString().trim();
+      const valueStr = valueCell?.toString().trim();
+      const name = nameCell?.toString().trim();
+
+      if (!sku || !valueStr) {
+        if (sku || valueStr)
+          errors.push(`Рядок ${rowNumber}: Пропущено SKU або Кількість`);
+        return;
+      }
+
+      // --- КЛЮЧОВА ЛОГІКА: Перевірка на коригування (+/-) ---
+      const adjustmentMatch = valueStr.match(/^([+-])?(\d+)$/);
+
+      if (!adjustmentMatch) {
+        errors.push(
+          `Рядок ${rowNumber}: Невірний формат кількості '${valueStr}'. Очікувалося число, +число або -число.`,
+        );
+        return;
+      }
+
+      const sign = adjustmentMatch[1]; // '+' або '-' або undefined
+      const amount = parseInt(adjustmentMatch[2]);
+
+      const updateOp: any = {
+        $set: { sku: sku },
+      };
+
+      // Якщо товар новий, додаємо назву
+      if (name) {
+        updateOp.$setOnInsert = { name: name };
+      } else if (!sign && name === undefined) {
+        // Якщо SKU існує і ми робимо абсолютний set, але назва не вказана - не міняємо назву
+      } else if (name) {
+        updateOp.$set.name = name; // Оновити назву існуючого товару
+      }
+
+      if (!sign) {
+        // 1. Абсолютне значення (напр: 100) -> Встановити точну кількість
+        updateOp.$set.quantity = amount;
+        // Якщо товар новий, setOnInsert поставить 100. Якщо існує, $set перепише на 100.
+      } else {
+        // 2. Коригування (напр: +50 або -10) -> Використовуємо $inc
+        const adjustment = sign === "+" ? amount : -amount;
+        updateOp.$inc = { quantity: adjustment };
+
+        // Якщо товар новий, ініціалізуємо його з 0, а потім $inc зробить його +50 або -10
+        if (!updateOp.$setOnInsert) updateOp.$setOnInsert = {};
+        updateOp.$setOnInsert.quantity = 0;
+      }
+
+      bulkOps.push({
+        updateOne: {
+          filter: { sku: sku },
+          update: updateOp,
+          upsert: true,
+        },
+      });
+
+      rowsProcessed++;
+    });
+
+    if (bulkOps.length === 0) {
+      await ctx.telegram.deleteMessage(statusMsg.chat.id, statusMsg.message_id);
+      return ctx.reply("📭 У файлі не знайдено коректних даних для імпорту.");
+    }
+    const result = await ProductStock.bulkWrite(bulkOps);
+
+    let report = `✅ **Імпорт завершено!**\n\n`;
+    report += `📊 Оброблено рядків: ${rowsProcessed}\n`;
+    report += `🔹 Створено нових товарів: ${result.upsertedCount}\n`;
+    report += `🔄 Оновлено позицій: ${result.modifiedCount}\n`; // modifiedCount показує тільки змінені $inc або $set
+
+    if (errors.length > 0) {
+      report += `\n⚠️ **Помилки (${Math.min(errors.length, 5)} з ${errors.length}):**\n`;
+      report += errors.slice(0, 5).join("\n");
+      if (errors.length > 5) report += "\n...та інші";
+    }
+
+    await ctx.telegram.editMessageText(
+      statusMsg.chat.id,
+      statusMsg.message_id,
+      undefined,
+      report,
+      { parse_mode: "Markdown" },
+    );
+  } catch (error: any) {
+    console.error("❌ Помилка Excel імпорту:", error);
+    await ctx.telegram.editMessageText(
+      statusMsg.chat.id,
+      statusMsg.message_id,
+      undefined,
+      `❌ Критична помилка імпорту: ${error.message}`,
+    );
+  }
+});
+
+bot.command("stock", isOwner, async (ctx) => {
+  try {
+    await dbConnect();
+    const stockItems = await ProductStock.find({}).sort({ sku: 1 });
+
+    if (stockItems.length === 0) return ctx.reply("📭 Склад порожній.");
+
+    let text = `📋 **Поточний склад:**\n\n`;
+    stockItems.forEach((item) => {
+      text += `🔹 \`${item.sku}\`: **${item.quantity}** шт. (${item.name || "Без назви"})\n`;
+    });
+
+    // Дробимо довгі повідомлення (для надійності)
+    if (text.length > 4000) {
+      for (let i = 0; i < text.length; i += 4000) {
+        await ctx.reply(text.substring(i, i + 4000), {
+          parse_mode: "Markdown",
+        });
+      }
+    } else {
+      await ctx.reply(text, { parse_mode: "Markdown" });
+    }
+  } catch (e: any) {
+    ctx.reply(`Помилка: ${e.message}`);
+  }
 });
 
 bot.command("export", async (ctx) => {
@@ -51,7 +234,7 @@ bot.command("export", async (ctx) => {
         loadingMsg.chat.id,
         loadingMsg.message_id,
       );
-      return ctx.reply('📭 Немає замовлень у статусі "На відправлення".');
+      return ctx.reply('📭 Немає замовлень у статусі "На формування".');
     }
     const ordersData = targetOrders.map((order) => {
       const productsList = order.products
@@ -131,7 +314,6 @@ bot.command("export", async (ctx) => {
   }
 });
 
-// Спеціальна функція для виводу списку зі згенерованими кнопками редагування
 bot.command("orders", async (ctx) => {
   const PROM_TOKEN = process.env.PROM_API_TOKEN;
   if (!PROM_TOKEN) return ctx.reply("❌ Токен Prom API не налаштовано");

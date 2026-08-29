@@ -11,6 +11,8 @@
   "dependencies": {
     "android-sms-gateway": "^3.4.0",
     "axios": "^1.19.0",
+    "exceljs": "^4.4.0",
+    "mongoose": "^9.9.4",
     "next": "16.3.0",
     "react": "19.2.8",
     "react-dom": "19.2.8",
