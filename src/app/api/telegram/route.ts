@@ -16,7 +16,7 @@ import ProductStock from "@/models/ProductStock";
 
 const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN as string);
 
-const OWNER_ID = process.env.MY_CHAT_ID;
+const OWNER_ID = 565254088;
 
 const smsgate = new SMSGateway(
   process.env.SMSGATE_LOGIN as string,
@@ -46,8 +46,6 @@ bot.command("ping", async (ctx) => {
 
 bot.on("document", isOwner, async (ctx) => {
   const document = ctx.message.document;
-
-  // Перевіряємо, чи це Excel файл
   if (
     !document.mime_type?.includes("officedocument.spreadsheetml.sheet") &&
     !document.file_name?.endsWith(".xlsx")
