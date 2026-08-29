@@ -71,7 +71,7 @@ bot.on("document", isOwner, async (ctx) => {
 
     // 3. Відкриваємо Excel книгу
     const workbook = new ExcelJS.Workbook();
-    await workbook.xlsx.load(buffer);
+    await workbook.xlsx.load(buffer as any);
     const worksheet = workbook.getWorksheet(1);
 
     if (!worksheet) {
