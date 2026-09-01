@@ -13,6 +13,7 @@ import {
 } from "@/lib/utils/func";
 import dbConnect from "@/lib/mongodb";
 import ProductStock from "@/models/ProductStock";
+import { exportOrdersExcel } from "@/lib/exportExcel";
 
 const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN as string);
 
@@ -148,106 +149,36 @@ bot.hears("📋 Мій склад", async (ctx) => {
   }
 });
 
-bot.hears("📥 Експорт замовлень (Excel)", async (ctx) => {
-  const PROM_TOKEN = process.env.PROM_API_TOKEN;
-  if (!PROM_TOKEN) return ctx.reply("❌ Токен Prom API не налаштовано");
+bot.hears("📥 Експорт (Excel)", async (ctx) => {
+  await ctx.reply("📂 Оберіть категорію замовлень для вивантаження:", {
+    reply_markup: {
+      inline_keyboard: [
+        [{ text: "🆕 Прийняті (Нові)", callback_data: "export_received" }],
+        [{ text: "💳 Оплачені", callback_data: "export_paid" }],
+        [
+          {
+            text: "⚙️ В обробці (На відправку)",
+            callback_data: "export_processing",
+          },
+        ],
+      ],
+    },
+  });
+});
 
-  const loadingMsg = await ctx.reply("⏳ Формую Excel файл...");
+bot.action("export_received", async (ctx) => {
+  await ctx.editMessageReplyMarkup({ inline_keyboard: [] }).catch(() => {});
+  await exportOrdersExcel(ctx, "received");
+});
 
-  try {
-    const headers = { Authorization: `Bearer ${PROM_TOKEN}` };
+bot.action("export_paid", async (ctx) => {
+  await ctx.editMessageReplyMarkup({ inline_keyboard: [] }).catch(() => {});
+  await exportOrdersExcel(ctx, "paid");
+});
 
-    const ordersRes = await axios.get(
-      "https://my.prom.ua/api/v1/orders/list?limit=100&status=received",
-      { headers },
-    );
-    const orders: Order[] = ordersRes.data.orders || [];
-    const targetOrders = orders.filter((o) => o.status === "custom-172802");
-
-    if (targetOrders.length === 0) {
-      await ctx.telegram.deleteMessage(
-        loadingMsg.chat.id,
-        loadingMsg.message_id,
-      );
-      return ctx.reply('📭 Немає замовлень у статусі "На формування".');
-    }
-    const ordersData = targetOrders.map((order) => {
-      const productsList = order.products
-        .map((p) => `${p.sku} (${p.quantity} шт.)`)
-        .join(";\n");
-
-      return {
-        "Номер замовлення": order.id,
-        Телефон: order.phone || "Немає номеру",
-        "Спосіб оплати": order.payment_option?.name || "Не вказано",
-        Товари: productsList,
-        "Сума (грн)":
-          Number(order.full_price.replace(/\s/g, "")) || order.full_price, // Пытаемся сделать числом для Excel
-      };
-    });
-
-    const worksheetOrders = XLSX.utils.json_to_sheet(ordersData);
-    worksheetOrders["!cols"] = [
-      { wch: 18 }, // Номер
-      { wch: 20 }, // Телефон
-      { wch: 30 }, // Спосіб оплати
-      { wch: 70 }, // Товари (широкая колонка)
-      { wch: 15 }, // Сума
-    ];
-
-    const productMap = new Map<string, any>();
-
-    for (const order of targetOrders) {
-      for (const product of order.products) {
-        const key = product.sku || product.id.toString();
-
-        if (productMap.has(key)) {
-          const existingProduct = productMap.get(key);
-          existingProduct.Кількість += product.quantity;
-        } else {
-          productMap.set(key, {
-            "Артикул (SKU)": product.sku || "Немає",
-            "Назва товару": product.name || "Без назви",
-            Кількість: product.quantity,
-            Зображення: product.image || "Немає фото",
-          });
-        }
-      }
-    }
-
-    const aggregatedProducts = Array.from(productMap.values());
-    const worksheetWarehouse = XLSX.utils.json_to_sheet(aggregatedProducts);
-    worksheetWarehouse["!cols"] = [
-      { wch: 15 }, // Артикул
-      { wch: 60 }, // Назва
-      { wch: 10 }, // Кількість
-      { wch: 50 }, // Зображення
-    ];
-    const workbook = XLSX.utils.book_new();
-
-    XLSX.utils.book_append_sheet(workbook, worksheetOrders, "Замовлення");
-    XLSX.utils.book_append_sheet(workbook, worksheetWarehouse, "Товари");
-
-    const excelBuffer = XLSX.write(workbook, {
-      bookType: "xlsx",
-      type: "buffer",
-    });
-
-    await ctx.telegram.deleteMessage(loadingMsg.chat.id, loadingMsg.message_id);
-
-    await ctx.replyWithDocument(
-      {
-        source: Buffer.from(excelBuffer),
-        filename: `Збірка_Товарів_${new Date().toLocaleDateString("uk-UA").replace(/\./g, "-")}.xlsx`,
-      },
-      {
-        caption: `📦 Звіт згенеровано!\n\n🔹 Замовлень: ${targetOrders.length}\n🔹 Унікальних товарів: ${aggregatedProducts.length}`,
-        ...mainMenu,
-      },
-    );
-  } catch (error: any) {
-    ctx.reply(`❌ Помилка при генерації файлу: ${error.message}`, mainMenu);
-  }
+bot.action("export_processing", async (ctx) => {
+  await ctx.editMessageReplyMarkup({ inline_keyboard: [] }).catch(() => {});
+  await exportOrdersExcel(ctx, "processing");
 });
 
 const isOwner = (ctx: any, next: any) => {
