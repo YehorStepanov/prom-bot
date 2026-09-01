@@ -4,7 +4,6 @@ import axios from "axios";
 import SMSGateway from "android-sms-gateway";
 import { Order } from "@/types/order";
 import { ChatRoom } from "@/types/chat";
-import * as XLSX from "xlsx";
 import ExcelJS from "exceljs";
 import {
   getOrderType,
@@ -32,10 +31,16 @@ bot.telegram
   ])
   .catch(console.error);
 
-const mainMenu = Markup.keyboard([
+export const mainMenu = Markup.keyboard([
   ["📦 Розсилка замовлень (Orders)"],
   ["📋 Мій склад", "📥 Експорт замовлень (Excel)"],
   ["Тут щось ще буде..."],
+]).resize();
+
+const exportMenu = Markup.keyboard([
+  ['🆕 Прийняті (Нові)'],
+  ['💳 Оплачені', '⚙️ В обробці'],
+  ['🔙 Назад']
 ]).resize();
 
 bot.start((ctx) => {
@@ -149,36 +154,24 @@ bot.hears("📋 Мій склад", async (ctx) => {
   }
 });
 
-bot.hears("📥 Експорт (Excel)", async (ctx) => {
-  await ctx.reply("📂 Оберіть категорію замовлень для вивантаження:", {
-    reply_markup: {
-      inline_keyboard: [
-        [{ text: "🆕 Прийняті (Нові)", callback_data: "export_received" }],
-        [{ text: "💳 Оплачені", callback_data: "export_paid" }],
-        [
-          {
-            text: "⚙️ В обробці (На відправку)",
-            callback_data: "export_processing",
-          },
-        ],
-      ],
-    },
-  });
+bot.hears("📥 Експорт замовлень (Excel)", async (ctx) => {
+  await ctx.reply('📂 Оберіть категорію замовлень для вивантаження:', exportMenu);
 });
 
-bot.action("export_received", async (ctx) => {
-  await ctx.editMessageReplyMarkup({ inline_keyboard: [] }).catch(() => {});
-  await exportOrdersExcel(ctx, "received");
+bot.hears('🔙 Назад', async (ctx) => {
+  await ctx.reply('Ви повернулися до головного меню ⬇️', mainMenu);
 });
 
-bot.action("export_paid", async (ctx) => {
-  await ctx.editMessageReplyMarkup({ inline_keyboard: [] }).catch(() => {});
-  await exportOrdersExcel(ctx, "paid");
+bot.hears('🆕 Прийняті (Нові)', async (ctx) => {
+  await exportOrdersExcel(ctx, 'received');
 });
 
-bot.action("export_processing", async (ctx) => {
-  await ctx.editMessageReplyMarkup({ inline_keyboard: [] }).catch(() => {});
-  await exportOrdersExcel(ctx, "processing");
+bot.hears('💳 Оплачені', async (ctx) => {
+  await exportOrdersExcel(ctx, 'paid');
+});
+
+bot.hears('⚙️ В обробці', async (ctx) => {
+  await exportOrdersExcel(ctx, 'processing');
 });
 
 const isOwner = (ctx: any, next: any) => {

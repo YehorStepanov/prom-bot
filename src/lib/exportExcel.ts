@@ -1,13 +1,15 @@
 import { Order } from "@/types/order";
 import ExcelJS from "exceljs";
 import axios from "axios";
+import { mainMenu } from "@/app/api/telegram/route";
 
 export async function exportOrdersExcel(
   ctx: any,
   filterType: "received" | "paid" | "processing",
 ) {
   const PROM_TOKEN = process.env.PROM_API_TOKEN;
-  if (!PROM_TOKEN) return ctx.reply("❌ Токен Prom API не налаштовано");
+  if (!PROM_TOKEN)
+    return ctx.reply("❌ Токен Prom API не налаштовано", mainMenu);
 
   let typeName = "";
   if (filterType === "received") typeName = "Нові (Прийняті)";
@@ -48,7 +50,10 @@ export async function exportOrdersExcel(
         loadingMsg.chat.id,
         loadingMsg.message_id,
       );
-      return ctx.reply(`📭 Немає замовлень у категорії "${typeName}".`);
+      return ctx.reply(
+        `📭 Немає замовлень у категорії "${typeName}".`,
+        mainMenu,
+      );
     }
 
     const workbook = new ExcelJS.Workbook();
@@ -141,6 +146,7 @@ export async function exportOrdersExcel(
       },
       {
         caption: `📊 **Звіт згенеровано!**\n\n🔹 Категорія: ${typeName}\n🔹 Замовлень: ${targetOrders.length}\n🔹 Унікальних товарів: ${aggregatedProducts.length}`,
+        ...mainMenu,
       },
     );
   } catch (error: any) {
