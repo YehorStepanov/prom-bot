@@ -23,6 +23,8 @@ const smsgate = new SMSGateway(
   process.env.SMSGATE_PASSWORD as string,
 );
 
+let isSmsSendingActive = false;
+
 bot.telegram
   .setMyCommands([
     { command: "export", description: "Експортувати замовлення з Prom" },
@@ -38,9 +40,9 @@ export const mainMenu = Markup.keyboard([
 ]).resize();
 
 const exportMenu = Markup.keyboard([
-  ['🆕 Прийняті (Нові)'],
-  ['💳 Оплачені', '⚙️ В обробці'],
-  ['🔙 Назад']
+  ["🆕 Прийняті (Нові)"],
+  ["💳 Оплачені", "⚙️ В обробці"],
+  ["🔙 Назад"],
 ]).resize();
 
 bot.start((ctx) => {
@@ -155,23 +157,26 @@ bot.hears("📋 Мій склад", async (ctx) => {
 });
 
 bot.hears("📥 Експорт замовлень (Excel)", async (ctx) => {
-  await ctx.reply('📂 Оберіть категорію замовлень для вивантаження:', exportMenu);
+  await ctx.reply(
+    "📂 Оберіть категорію замовлень для вивантаження:",
+    exportMenu,
+  );
 });
 
-bot.hears('🔙 Назад', async (ctx) => {
-  await ctx.reply('Ви повернулися до головного меню ⬇️', mainMenu);
+bot.hears("🔙 Назад", async (ctx) => {
+  await ctx.reply("Ви повернулися до головного меню ⬇️", mainMenu);
 });
 
-bot.hears('🆕 Прийняті (Нові)', async (ctx) => {
-  await exportOrdersExcel(ctx, 'received');
+bot.hears("🆕 Прийняті (Нові)", async (ctx) => {
+  await exportOrdersExcel(ctx, "received");
 });
 
-bot.hears('💳 Оплачені', async (ctx) => {
-  await exportOrdersExcel(ctx, 'paid');
+bot.hears("💳 Оплачені", async (ctx) => {
+  await exportOrdersExcel(ctx, "paid");
 });
 
-bot.hears('⚙️ В обробці', async (ctx) => {
-  await exportOrdersExcel(ctx, 'processing');
+bot.hears("⚙️ В обробці", async (ctx) => {
+  await exportOrdersExcel(ctx, "processing");
 });
 
 const isOwner = (ctx: any, next: any) => {
@@ -389,79 +394,84 @@ bot.on("text", async (ctx) => {
   }
 });
 
-// ВІДПРАВКА ВСІХ ПОВІДОМЛЕНЬ (Гібридна: Чат + SMS)
 bot.action("send_all_sms", async (ctx) => {
+  await ctx.answerCbQuery("Обробка запиту...");
+  if (isSmsSendingActive) {
+    return ctx.reply(
+      "⚠️ **Система зайнята.** Інша пачка повідомлень зараз відправляється. Будь ласка, дочекайтесь її завершення.",
+    );
+  }
   const message = ctx.callbackQuery.message;
   const messageText = message && "text" in message ? message.text : "";
+  if (!messageText) return ctx.reply("Помилка читання тексту");
+  isSmsSendingActive = true;
+  try {
+    const blocks = messageText
+      .split("〰️〰️〰️〰️〰️〰️〰️〰️")
+      .filter((b) => b.trim().length > 10);
 
-  if (!messageText) return ctx.answerCbQuery("Помилка читання тексту");
-  await ctx.answerCbQuery("Починаю відправку...");
+    const statusMsg = await ctx.reply(
+      `⏳ Обробляю ${blocks.length} замовлень...`,
+    );
+    const PROM_TOKEN = process.env.PROM_API_TOKEN;
 
-  // Розбиваємо весь текст на блоки по кожному замовленню
-  const blocks = messageText
-    .split("〰️〰️〰️〰️〰️〰️〰️〰️")
-    .filter((b) => b.trim().length > 10);
+    let smsCount = 0;
+    let chatCount = 0;
+    let errorCount = 0;
 
-  const statusMsg = await ctx.reply(
-    `⏳ Обробляю ${blocks.length} замовлень...`,
-  );
-  const PROM_TOKEN = process.env.PROM_API_TOKEN;
+    for (const block of blocks) {
+      const phoneMatch = block.match(/📞\s*(\+?\d+)/);
+      const textMatch = block.match(/📝 Текст:\s*([\s\S]*)$/);
+      const roomMatch = block.match(/🟢 Пром-чат \((\d+)\)/);
 
-  let smsCount = 0;
-  let chatCount = 0;
-  let errorCount = 0;
-
-  for (const block of blocks) {
-    const phoneMatch = block.match(/📞\s*(\+?\d+)/);
-    const textMatch = block.match(/📝 Текст:\s*([\s\S]*)$/);
-    const roomMatch = block.match(/🟢 Пром-чат \((\d+)\)/); // Перевіряємо чи є ID чату
-
-    if (!phoneMatch || !textMatch) continue;
-
-    const phone = phoneMatch[1];
-    const textToSend = textMatch[1].trim();
-
-    if (roomMatch && PROM_TOKEN) {
-      // 1. ВАРІАНТ: Є Пром-чат -> Відправляємо через API Prom
-      const roomId = roomMatch[1];
-      try {
-        await axios.post(
-          `https://my.prom.ua/api/v1/chat/rooms/${roomId}/messages`,
-          {
-            text: textToSend,
-          },
-          {
-            headers: { Authorization: `Bearer ${PROM_TOKEN}` },
-          },
-        );
-        chatCount++;
-        await new Promise((resolve) => setTimeout(resolve, 1000)); // Затримка для Prom API
-      } catch (error) {
-        console.error(`Помилка Prom-чату для кімнати ${roomId}:`, error);
-        errorCount++;
-        // Як варіант на майбутнє: тут можна додати fallback на SMS, якщо чат не пройшов
-      }
-    } else {
-      try {
-        await smsgate.send({ phoneNumbers: [phone], message: textToSend });
-        smsCount++;
-        await new Promise((resolve) => setTimeout(resolve, 2000));
-      } catch (error) {
-        console.error(`Помилка SMS на номер ${phone}:`, error);
-        errorCount++;
+      if (!phoneMatch || !textMatch) continue;
+      const phone = phoneMatch[1];
+      const textToSend = textMatch[1].trim();
+      if (roomMatch && PROM_TOKEN) {
+        const roomId = roomMatch[1];
+        try {
+          await axios.post(
+            `https://my.prom.ua/api/v1/chat/rooms/${roomId}/messages`,
+            {
+              text: textToSend,
+            },
+            {
+              headers: { Authorization: `Bearer ${PROM_TOKEN}` },
+            },
+          );
+          chatCount++;
+          await new Promise((resolve) => setTimeout(resolve, 1000));
+        } catch (error) {
+          console.error(`Помилка Prom-чату для кімнати ${roomId}:`, error);
+          errorCount++;
+        }
+      } else {
+        try {
+          await smsgate.send({ phoneNumbers: [phone], message: textToSend });
+          smsCount++;
+          await new Promise((resolve) => setTimeout(resolve, 3000));
+        } catch (error) {
+          console.error(`Помилка SMS на номер ${phone}:`, error);
+          errorCount++;
+        }
       }
     }
+
+    await ctx.telegram.editMessageText(
+      statusMsg.chat.id,
+      statusMsg.message_id,
+      undefined,
+      `✅ Розсилка завершена!\n\n💬 У Пром-чат: ${chatCount}\n📱 По SMS: ${smsCount}\n❌ Помилок: ${errorCount}`,
+    );
+
+    await ctx.editMessageReplyMarkup({ inline_keyboard: [] });
+    await ctx.reply("Готово! Оберіть наступну дію ⬇️", mainMenu);
+  } catch (error: any) {
+    console.error("Критична помилка розсилки:", error);
+    await ctx.reply(`❌ Сталася помилка під час обробки: ${error.message}`);
+  } finally {
+    isSmsSendingActive = false;
   }
-
-  await ctx.telegram.editMessageText(
-    statusMsg.chat.id,
-    statusMsg.message_id,
-    undefined,
-    `✅ Розсилка завершена!\n\n💬 У Пром-чат: ${chatCount}\n📱 По SMS: ${smsCount}\n❌ Помилок: ${errorCount}`,
-  );
-
-  await ctx.editMessageReplyMarkup({ inline_keyboard: [] });
-  await ctx.reply("Готово! Оберіть наступну дію ⬇️", mainMenu);
 });
 
 export async function POST(req: Request) {
