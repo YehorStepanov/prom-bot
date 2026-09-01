@@ -1,4 +1,4 @@
-import { Telegraf } from "telegraf";
+import { Markup, Telegraf } from "telegraf";
 import { NextResponse } from "next/server";
 import axios from "axios";
 import SMSGateway from "android-sms-gateway";
@@ -30,6 +30,227 @@ bot.telegram
     { command: "ping", description: "Перевірити статус бота" },
   ])
   .catch(console.error);
+
+bot.start((ctx) => {
+  ctx.reply(
+    "👋 Привіт, власник!\n\nОберіть дію з меню нижче:",
+    Markup.keyboard([
+      ["📦 Розсилка замовлень (Orders)"],
+      ["📋 Мій склад", "📥 Експорт замовлень (Excel)"],
+      ["⚙️ Налаштування"],
+    ]).resize(),
+  );
+});
+
+bot.hears("📦 Розсилка замовлень (Orders)", async (ctx) => {
+  const PROM_TOKEN = process.env.PROM_API_TOKEN;
+  if (!PROM_TOKEN) return ctx.reply("❌ Токен Prom API не налаштовано");
+
+  const loadingMsg = await ctx.reply(
+    "⏳ Завантажую замовлення та перевіряю чати Prom...",
+  );
+
+  try {
+    const headers = { Authorization: `Bearer ${PROM_TOKEN}` };
+
+    // 1. Отримуємо замовлення
+    const ordersRes = await axios.get(
+      "https://my.prom.ua/api/v1/orders/list?limit=100&status=received",
+      { headers },
+    );
+    const orders: Order[] = ordersRes.data.orders || [];
+    const targetOrders = orders.filter((o) => o.status === "custom-172548");
+
+    if (targetOrders.length === 0) {
+      await ctx.telegram.deleteMessage(
+        loadingMsg.chat.id,
+        loadingMsg.message_id,
+      );
+      return ctx.reply('📭 Немає замовлень у статусі "На відправлення".');
+    }
+
+    // 2. Отримуємо чати компанії (якщо метод підтримується)
+    let chatRooms: ChatRoom[] = [];
+    try {
+      const chatsRes = await axios.get("https://my.prom.ua/api/v1/chat/rooms", {
+        headers,
+      });
+      chatRooms = chatsRes.data?.data?.rooms || chatsRes.data?.rooms || [];
+    } catch (e) {
+      console.log("Не вдалося завантажити чати, продовжуємо без них", e);
+    }
+
+    await ctx.telegram.deleteMessage(loadingMsg.chat.id, loadingMsg.message_id);
+
+    // ==========================================
+    // РОЗБИВАЄМО ЗАМОВЛЕННЯ НА БЛОКИ (ПО 10 ШТУК)
+    // ==========================================
+    const chunkSize = 10;
+    const totalOrders = targetOrders.length;
+
+    for (let i = 0; i < totalOrders; i += chunkSize) {
+      const chunk = targetOrders.slice(i, i + chunkSize);
+
+      // Заголовок для кожної частини
+      let combinedText = `📋 Список (${i + 1}-${Math.min(i + chunkSize, totalOrders)} з ${totalOrders}):\n\n`;
+
+      for (const order of chunk) {
+        const orderId = order.id;
+        const clientName = order.client_first_name || "Без імені";
+        const phone = order.phone || "Немає номеру";
+        const ttn =
+          order.delivery_provider_data?.declaration_number || "Немає ТТН";
+        const orderType = getOrderType(order.products);
+        const deliveryType = getDeliveryType(
+          order.delivery_provider_data?.provider,
+        );
+        const textMsg = `${orderType} від optotorg.com.ua ${deliveryType}: ${ttn}`;
+
+        const room = chatRooms.find(
+          (r) => r.buyer_client_id === order.client_id,
+        );
+        const statusText = room ? `🟢 Пром-чат (${room.id})` : `📱 Тільки SMS`;
+
+        combinedText += `📦 №${orderId}\n`;
+        combinedText += `👤 Клієнт: ${clientName}\n`;
+        combinedText += `📞 ${phone}\n`;
+        combinedText += `💬 Статус: ${statusText}\n`;
+        combinedText += `📝 Текст: ${textMsg}\n`;
+        combinedText += `〰️〰️〰️〰️〰️〰️〰️〰️\n`;
+      }
+      await sendListMessage(ctx, combinedText);
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+  } catch (error: any) {
+    ctx.reply(`❌ Помилка: ${error.message}`);
+  }
+});
+
+bot.hears("📋 Мій склад", async (ctx) => {
+  try {
+    await dbConnect();
+    const stockItems = await ProductStock.find({}).sort({ sku: 1 });
+
+    if (stockItems.length === 0) return ctx.reply("📭 Склад порожній.");
+
+    let text = `📋 **Поточний склад:**\n\n`;
+    stockItems.forEach((item) => {
+      text += `🔹 \`${item.sku}\`: **${item.quantity}** шт. (${item.name || "Без назви"})\n`;
+    });
+    if (text.length > 4000) {
+      for (let i = 0; i < text.length; i += 4000) {
+        await ctx.reply(text.substring(i, i + 4000), {
+          parse_mode: "Markdown",
+        });
+      }
+    } else {
+      await ctx.reply(text, { parse_mode: "Markdown" });
+    }
+  } catch (e: any) {
+    ctx.reply(`Помилка: ${e.message}`);
+  }
+});
+
+bot.hears("📥 Експорт замовлень (Excel)", async (ctx) => {
+  const PROM_TOKEN = process.env.PROM_API_TOKEN;
+  if (!PROM_TOKEN) return ctx.reply("❌ Токен Prom API не налаштовано");
+
+  const loadingMsg = await ctx.reply("⏳ Формую Excel файл...");
+
+  try {
+    const headers = { Authorization: `Bearer ${PROM_TOKEN}` };
+
+    const ordersRes = await axios.get(
+      "https://my.prom.ua/api/v1/orders/list?limit=100&status=received",
+      { headers },
+    );
+    const orders: Order[] = ordersRes.data.orders || [];
+    const targetOrders = orders.filter((o) => o.status === "custom-172802");
+
+    if (targetOrders.length === 0) {
+      await ctx.telegram.deleteMessage(
+        loadingMsg.chat.id,
+        loadingMsg.message_id,
+      );
+      return ctx.reply('📭 Немає замовлень у статусі "На формування".');
+    }
+    const ordersData = targetOrders.map((order) => {
+      const productsList = order.products
+        .map((p) => `${p.sku} (${p.quantity} шт.)`)
+        .join(";\n");
+
+      return {
+        "Номер замовлення": order.id,
+        Телефон: order.phone || "Немає номеру",
+        "Спосіб оплати": order.payment_option?.name || "Не вказано",
+        Товари: productsList,
+        "Сума (грн)":
+          Number(order.full_price.replace(/\s/g, "")) || order.full_price, // Пытаемся сделать числом для Excel
+      };
+    });
+
+    const worksheetOrders = XLSX.utils.json_to_sheet(ordersData);
+    worksheetOrders["!cols"] = [
+      { wch: 18 }, // Номер
+      { wch: 20 }, // Телефон
+      { wch: 30 }, // Спосіб оплати
+      { wch: 70 }, // Товари (широкая колонка)
+      { wch: 15 }, // Сума
+    ];
+
+    const productMap = new Map<string, any>();
+
+    for (const order of targetOrders) {
+      for (const product of order.products) {
+        const key = product.sku || product.id.toString();
+
+        if (productMap.has(key)) {
+          const existingProduct = productMap.get(key);
+          existingProduct.Кількість += product.quantity;
+        } else {
+          productMap.set(key, {
+            "Артикул (SKU)": product.sku || "Немає",
+            "Назва товару": product.name || "Без назви",
+            Кількість: product.quantity,
+            Зображення: product.image || "Немає фото",
+          });
+        }
+      }
+    }
+
+    const aggregatedProducts = Array.from(productMap.values());
+    const worksheetWarehouse = XLSX.utils.json_to_sheet(aggregatedProducts);
+    worksheetWarehouse["!cols"] = [
+      { wch: 15 }, // Артикул
+      { wch: 60 }, // Назва
+      { wch: 10 }, // Кількість
+      { wch: 50 }, // Зображення
+    ];
+    const workbook = XLSX.utils.book_new();
+
+    XLSX.utils.book_append_sheet(workbook, worksheetOrders, "Замовлення");
+    XLSX.utils.book_append_sheet(workbook, worksheetWarehouse, "Товари");
+
+    const excelBuffer = XLSX.write(workbook, {
+      bookType: "xlsx",
+      type: "buffer",
+    });
+
+    await ctx.telegram.deleteMessage(loadingMsg.chat.id, loadingMsg.message_id);
+
+    await ctx.replyWithDocument(
+      {
+        source: Buffer.from(excelBuffer),
+        filename: `Збірка_Товарів_${new Date().toLocaleDateString("uk-UA").replace(/\./g, "-")}.xlsx`,
+      },
+      {
+        caption: `📦 Звіт згенеровано!\n\n🔹 Замовлень: ${targetOrders.length}\n🔹 Унікальних товарів: ${aggregatedProducts.length}`,
+      },
+    );
+  } catch (error: any) {
+    ctx.reply(`❌ Помилка при генерації файлу: ${error.message}`);
+  }
+});
 
 const isOwner = (ctx: any, next: any) => {
   if (ctx.from?.id !== OWNER_ID) {
@@ -181,222 +402,6 @@ bot.on("document", isOwner, async (ctx) => {
       undefined,
       `❌ Критична помилка імпорту: ${error.message}`,
     );
-  }
-});
-
-bot.command("stock", isOwner, async (ctx) => {
-  try {
-    await dbConnect();
-    const stockItems = await ProductStock.find({}).sort({ sku: 1 });
-
-    if (stockItems.length === 0) return ctx.reply("📭 Склад порожній.");
-
-    let text = `📋 **Поточний склад:**\n\n`;
-    stockItems.forEach((item) => {
-      text += `🔹 \`${item.sku}\`: **${item.quantity}** шт. (${item.name || "Без назви"})\n`;
-    });
-
-    // Дробимо довгі повідомлення (для надійності)
-    if (text.length > 4000) {
-      for (let i = 0; i < text.length; i += 4000) {
-        await ctx.reply(text.substring(i, i + 4000), {
-          parse_mode: "Markdown",
-        });
-      }
-    } else {
-      await ctx.reply(text, { parse_mode: "Markdown" });
-    }
-  } catch (e: any) {
-    ctx.reply(`Помилка: ${e.message}`);
-  }
-});
-
-bot.command("export", async (ctx) => {
-  const PROM_TOKEN = process.env.PROM_API_TOKEN;
-  if (!PROM_TOKEN) return ctx.reply("❌ Токен Prom API не налаштовано");
-
-  const loadingMsg = await ctx.reply("⏳ Формую Excel файл...");
-
-  try {
-    const headers = { Authorization: `Bearer ${PROM_TOKEN}` };
-
-    const ordersRes = await axios.get(
-      "https://my.prom.ua/api/v1/orders/list?limit=100&status=received",
-      { headers },
-    );
-    const orders: Order[] = ordersRes.data.orders || [];
-    const targetOrders = orders.filter((o) => o.status === "custom-172802");
-
-    if (targetOrders.length === 0) {
-      await ctx.telegram.deleteMessage(
-        loadingMsg.chat.id,
-        loadingMsg.message_id,
-      );
-      return ctx.reply('📭 Немає замовлень у статусі "На формування".');
-    }
-    const ordersData = targetOrders.map((order) => {
-      const productsList = order.products
-        .map((p) => `${p.sku} (${p.quantity} шт.)`)
-        .join(";\n");
-
-      return {
-        "Номер замовлення": order.id,
-        Телефон: order.phone || "Немає номеру",
-        "Спосіб оплати": order.payment_option?.name || "Не вказано",
-        Товари: productsList,
-        "Сума (грн)":
-          Number(order.full_price.replace(/\s/g, "")) || order.full_price, // Пытаемся сделать числом для Excel
-      };
-    });
-
-    const worksheetOrders = XLSX.utils.json_to_sheet(ordersData);
-    worksheetOrders["!cols"] = [
-      { wch: 18 }, // Номер
-      { wch: 20 }, // Телефон
-      { wch: 30 }, // Спосіб оплати
-      { wch: 70 }, // Товари (широкая колонка)
-      { wch: 15 }, // Сума
-    ];
-
-    const productMap = new Map<string, any>();
-
-    for (const order of targetOrders) {
-      for (const product of order.products) {
-        const key = product.sku || product.id.toString();
-
-        if (productMap.has(key)) {
-          const existingProduct = productMap.get(key);
-          existingProduct.Кількість += product.quantity;
-        } else {
-          productMap.set(key, {
-            "Артикул (SKU)": product.sku || "Немає",
-            "Назва товару": product.name || "Без назви",
-            Кількість: product.quantity,
-            Зображення: product.image || "Немає фото",
-          });
-        }
-      }
-    }
-
-    const aggregatedProducts = Array.from(productMap.values());
-    const worksheetWarehouse = XLSX.utils.json_to_sheet(aggregatedProducts);
-    worksheetWarehouse["!cols"] = [
-      { wch: 15 }, // Артикул
-      { wch: 60 }, // Назва
-      { wch: 10 }, // Кількість
-      { wch: 50 }, // Зображення
-    ];
-    const workbook = XLSX.utils.book_new();
-
-    XLSX.utils.book_append_sheet(workbook, worksheetOrders, "Замовлення");
-    XLSX.utils.book_append_sheet(workbook, worksheetWarehouse, "Товари");
-
-    const excelBuffer = XLSX.write(workbook, {
-      bookType: "xlsx",
-      type: "buffer",
-    });
-
-    await ctx.telegram.deleteMessage(loadingMsg.chat.id, loadingMsg.message_id);
-
-    await ctx.replyWithDocument(
-      {
-        source: Buffer.from(excelBuffer),
-        filename: `Збірка_Товарів_${new Date().toLocaleDateString("uk-UA").replace(/\./g, "-")}.xlsx`,
-      },
-      {
-        caption: `📦 Звіт згенеровано!\n\n🔹 Замовлень: ${targetOrders.length}\n🔹 Унікальних товарів: ${aggregatedProducts.length}`,
-      },
-    );
-  } catch (error: any) {
-    ctx.reply(`❌ Помилка при генерації файлу: ${error.message}`);
-  }
-});
-
-bot.command("orders", async (ctx) => {
-  const PROM_TOKEN = process.env.PROM_API_TOKEN;
-  if (!PROM_TOKEN) return ctx.reply("❌ Токен Prom API не налаштовано");
-
-  const loadingMsg = await ctx.reply(
-    "⏳ Завантажую замовлення та перевіряю чати Prom...",
-  );
-
-  try {
-    const headers = { Authorization: `Bearer ${PROM_TOKEN}` };
-
-    // 1. Отримуємо замовлення
-    const ordersRes = await axios.get(
-      "https://my.prom.ua/api/v1/orders/list?limit=100&status=received",
-      { headers },
-    );
-    const orders: Order[] = ordersRes.data.orders || [];
-    const targetOrders = orders.filter((o) => o.status === "custom-172548");
-
-    if (targetOrders.length === 0) {
-      await ctx.telegram.deleteMessage(
-        loadingMsg.chat.id,
-        loadingMsg.message_id,
-      );
-      return ctx.reply('📭 Немає замовлень у статусі "На відправлення".');
-    }
-
-    // 2. Отримуємо чати компанії (якщо метод підтримується)
-    let chatRooms: ChatRoom[] = [];
-    try {
-      const chatsRes = await axios.get("https://my.prom.ua/api/v1/chat/rooms", {
-        headers,
-      });
-      chatRooms = chatsRes.data?.data?.rooms || chatsRes.data?.rooms || [];
-    } catch (e) {
-      console.log("Не вдалося завантажити чати, продовжуємо без них", e);
-    }
-
-    await ctx.telegram.deleteMessage(loadingMsg.chat.id, loadingMsg.message_id);
-
-    // ==========================================
-    // РОЗБИВАЄМО ЗАМОВЛЕННЯ НА БЛОКИ (ПО 10 ШТУК)
-    // ==========================================
-    const chunkSize = 10;
-    const totalOrders = targetOrders.length;
-
-    for (let i = 0; i < totalOrders; i += chunkSize) {
-      const chunk = targetOrders.slice(i, i + chunkSize);
-
-      // Заголовок для кожної частини
-      let combinedText = `📋 Список (${i + 1}-${Math.min(i + chunkSize, totalOrders)} з ${totalOrders}):\n\n`;
-
-      for (const order of chunk) {
-        const orderId = order.id;
-        const clientName = order.client_first_name || "Без імені";
-        const phone = order.phone || "Немає номеру";
-        const ttn =
-          order.delivery_provider_data?.declaration_number || "Немає ТТН";
-        const orderType = getOrderType(order.products);
-        const deliveryType = getDeliveryType(
-          order.delivery_provider_data?.provider,
-        );
-        const textMsg = `${orderType} від optotorg.com.ua ${deliveryType}: ${ttn}`;
-
-        const room = chatRooms.find(
-          (r) => r.buyer_client_id === order.client_id,
-        );
-        const statusText = room ? `🟢 Пром-чат (${room.id})` : `📱 Тільки SMS`;
-
-        combinedText += `📦 №${orderId}\n`;
-        combinedText += `👤 Клієнт: ${clientName}\n`;
-        combinedText += `📞 ${phone}\n`;
-        combinedText += `💬 Статус: ${statusText}\n`;
-        combinedText += `📝 Текст: ${textMsg}\n`;
-        combinedText += `〰️〰️〰️〰️〰️〰️〰️〰️\n`;
-      }
-
-      // Відправляємо кожну частину окремим повідомленням
-      await sendListMessage(ctx, combinedText);
-
-      // Робимо паузу 0.5 сек між відправкою повідомлень, щоб Telegram не заблокував за спам
-      await new Promise((resolve) => setTimeout(resolve, 500));
-    }
-  } catch (error: any) {
-    ctx.reply(`❌ Помилка: ${error.message}`);
   }
 });
 
