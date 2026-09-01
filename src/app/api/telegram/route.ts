@@ -31,15 +31,14 @@ bot.telegram
   ])
   .catch(console.error);
 
+const mainMenu = Markup.keyboard([
+  ["📦 Розсилка замовлень (Orders)"],
+  ["📋 Мій склад", "📥 Експорт замовлень (Excel)"],
+  ["Тут щось ще буде..."],
+]).resize();
+
 bot.start((ctx) => {
-  ctx.reply(
-    "👋 Привіт, власник!\n\nОберіть дію з меню нижче:",
-    Markup.keyboard([
-      ["📦 Розсилка замовлень (Orders)"],
-      ["📋 Мій склад", "📥 Експорт замовлень (Excel)"],
-      ["⚙️ Налаштування"],
-    ]).resize(),
-  );
+  ctx.reply("👋 Привіт, власник!\n\nОберіть дію з меню нижче:", mainMenu);
 });
 
 bot.hears("📦 Розсилка замовлень (Orders)", async (ctx) => {
@@ -68,8 +67,6 @@ bot.hears("📦 Розсилка замовлень (Orders)", async (ctx) => {
       );
       return ctx.reply('📭 Немає замовлень у статусі "На відправлення".');
     }
-
-    // 2. Отримуємо чати компанії (якщо метод підтримується)
     let chatRooms: ChatRoom[] = [];
     try {
       const chatsRes = await axios.get("https://my.prom.ua/api/v1/chat/rooms", {
@@ -122,7 +119,7 @@ bot.hears("📦 Розсилка замовлень (Orders)", async (ctx) => {
       await new Promise((resolve) => setTimeout(resolve, 500));
     }
   } catch (error: any) {
-    ctx.reply(`❌ Помилка: ${error.message}`);
+    ctx.reply(`❌ Помилка: ${error.message}`, mainMenu);
   }
 });
 
@@ -245,10 +242,11 @@ bot.hears("📥 Експорт замовлень (Excel)", async (ctx) => {
       },
       {
         caption: `📦 Звіт згенеровано!\n\n🔹 Замовлень: ${targetOrders.length}\n🔹 Унікальних товарів: ${aggregatedProducts.length}`,
+        ...mainMenu,
       },
     );
   } catch (error: any) {
-    ctx.reply(`❌ Помилка при генерації файлу: ${error.message}`);
+    ctx.reply(`❌ Помилка при генерації файлу: ${error.message}`, mainMenu);
   }
 });
 
@@ -256,13 +254,14 @@ const isOwner = (ctx: any, next: any) => {
   if (ctx.from?.id !== OWNER_ID) {
     return ctx.reply(
       "⛔️ Доступ заборонено. Тільки власник може керувати складом.",
+      mainMenu,
     );
   }
   return next();
 };
 
 bot.command("ping", async (ctx) => {
-  ctx.reply("🏓 Pong! Бот працює.");
+  ctx.reply("🏓 Pong! Бот працює.", mainMenu);
 });
 
 bot.on("document", isOwner, async (ctx) => {
@@ -273,6 +272,7 @@ bot.on("document", isOwner, async (ctx) => {
   ) {
     return ctx.reply(
       "❌ Помилка: Я приймаю тільки файли формату Excel (.xlsx).",
+      mainMenu,
     );
   }
 
@@ -372,7 +372,10 @@ bot.on("document", isOwner, async (ctx) => {
 
     if (bulkOps.length === 0) {
       await ctx.telegram.deleteMessage(statusMsg.chat.id, statusMsg.message_id);
-      return ctx.reply("📭 У файлі не знайдено коректних даних для імпорту.");
+      return ctx.reply(
+        "📭 У файлі не знайдено коректних даних для імпорту.",
+        mainMenu,
+      );
     }
     const result = await ProductStock.bulkWrite(bulkOps);
 
@@ -534,6 +537,7 @@ bot.action("send_all_sms", async (ctx) => {
   );
 
   await ctx.editMessageReplyMarkup({ inline_keyboard: [] });
+  await ctx.reply("Готово! Оберіть наступну дію ⬇️", mainMenu);
 });
 
 export async function POST(req: Request) {
